@@ -21,6 +21,21 @@ app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'CryptoQuest Backend API',
+    version: '1.0.0',
+    endpoints: [
+      'POST /api/users',
+      'GET /api/users/:privyDid',
+      'POST /api/scores',
+      'GET /api/users/:privyDid/history',
+      'GET /api/leaderboard'
+    ]
+  });
+});
+
 // =====================================================
 // ENDPOINT 1: POST /api/users - Create new user
 // =====================================================
@@ -94,54 +109,7 @@ app.post('/api/users', (req, res) => {
 });
 
 // =====================================================
-// ENDPOINT 2: GET /api/users/{privyDid} - Get user profile
-// =====================================================
-app.get('/api/users/:privyDid', (req, res) => {
-  const { privyDid } = req.params;
-
-  db.get(
-    'SELECT * FROM users WHERE privy_did = ?',
-    [privyDid],
-    (err, user) => {
-      if (err) {
-        console.error('Database error:', err);
-        return res.status(500).json({
-          success: false,
-          message: 'Database error'
-        });
-      }
-
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: 'User not found'
-        });
-      }
-
-      // Get user's quiz count
-      db.get(
-        'SELECT COUNT(*) as quiz_count FROM scores WHERE privy_did = ?',
-        [privyDid],
-        (err, stats) => {
-          if (err) {
-            console.error('Error getting user stats:', err);
-          }
-
-          res.json({
-            success: true,
-            data: {
-              ...user,
-              quiz_count: stats?.quiz_count || 0
-            }
-          });
-        }
-      );
-    }
-  );
-});
-
-// =====================================================
-// ENDPOINT 3: POST /api/scores - Submit quiz score
+// ENDPOINT 2: POST /api/scores - Submit quiz score  
 // =====================================================
 app.post('/api/scores', (req, res) => {
   const { privyDid, quizId, score, difficulty } = req.body;
@@ -234,10 +202,108 @@ app.post('/api/scores', (req, res) => {
 });
 
 // =====================================================
-// ENDPOINT 4: GET /api/users/{privyDid}/history - Get user quiz history
+// ENDPOINT 3: GET /api/leaderboard - Get leaderboard
+// =====================================================
+app.get('/api/leaderboard', (req, res) => {
+  const limit = parseInt(req.query.limit) || 100;
+
+  db.all(
+    `SELECT 
+      privy_did,
+      username,
+      total_score,
+      avatar,
+      created_at,
+      (SELECT COUNT(*) FROM scores WHERE scores.privy_did = users.privy_did) as quiz_count
+     FROM users 
+     WHERE total_score > 0 
+     ORDER BY total_score DESC 
+     LIMIT ?`,
+    [limit],
+    (err, users) => {
+      if (err) {
+        console.error('Error fetching leaderboard:', err);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to fetch leaderboard'
+        });
+      }
+
+      // Add rank to each user
+      const leaderboard = users.map((user, index) => ({
+        rank: index + 1,
+        name: user.username || 'Anonymous',
+        score: user.total_score,
+        avatar: user.avatar,
+        privyDid: user.privy_did,
+        quiz_count: user.quiz_count,
+        joined_date: user.created_at
+      }));
+
+      res.json({
+        success: true,
+        data: {
+          leaderboard,
+          total_players: users.length,
+          last_updated: new Date().toISOString()
+        }
+      });
+    }
+  );
+});
+
+// =====================================================
+// ENDPOINT 4: GET /api/users/:privyDid - Get user profile
+// =====================================================
+app.get('/api/users/:privyDid', (req, res) => {
+  const privyDid = req.params.privyDid;
+
+  db.get(
+    'SELECT * FROM users WHERE privy_did = ?',
+    [privyDid],
+    (err, user) => {
+      if (err) {
+        console.error('Database error:', err);
+        return res.status(500).json({
+          success: false,
+          message: 'Database error'
+        });
+      }
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: 'User not found'
+        });
+      }
+
+      // Get user's quiz count
+      db.get(
+        'SELECT COUNT(*) as quiz_count FROM scores WHERE privy_did = ?',
+        [privyDid],
+        (err, stats) => {
+          if (err) {
+            console.error('Error getting user stats:', err);
+          }
+
+          res.json({
+            success: true,
+            data: {
+              ...user,
+              quiz_count: stats?.quiz_count || 0
+            }
+          });
+        }
+      );
+    }
+  );
+});
+
+// =====================================================
+// ENDPOINT 5: GET /api/users/:privyDid/history - Get user quiz history
 // =====================================================
 app.get('/api/users/:privyDid/history', (req, res) => {
-  const { privyDid } = req.params;
+  const privyDid = req.params.privyDid;
   const limit = parseInt(req.query.limit) || 20;
   const offset = parseInt(req.query.offset) || 0;
 
@@ -301,57 +367,6 @@ app.get('/api/users/:privyDid/history', (req, res) => {
   );
 });
 
-// =====================================================
-// ENDPOINT 5: GET /api/leaderboard - Get leaderboard
-// =====================================================
-app.get('/api/leaderboard', (req, res) => {
-  const limit = parseInt(req.query.limit) || 100;
-
-  db.all(
-    `SELECT 
-      privy_did,
-      username,
-      total_score,
-      avatar,
-      created_at,
-      (SELECT COUNT(*) FROM scores WHERE scores.privy_did = users.privy_did) as quiz_count
-     FROM users 
-     WHERE total_score > 0 
-     ORDER BY total_score DESC 
-     LIMIT ?`,
-    [limit],
-    (err, users) => {
-      if (err) {
-        console.error('Error fetching leaderboard:', err);
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to fetch leaderboard'
-        });
-      }
-
-      // Add rank to each user
-      const leaderboard = users.map((user, index) => ({
-        rank: index + 1,
-        name: user.username || 'Anonymous',
-        score: user.total_score,
-        avatar: user.avatar,
-        privyDid: user.privy_did,
-        quiz_count: user.quiz_count,
-        joined_date: user.created_at
-      }));
-
-      res.json({
-        success: true,
-        data: {
-          leaderboard,
-          total_players: users.length,
-          last_updated: new Date().toISOString()
-        }
-      });
-    }
-  );
-});
-
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
@@ -361,11 +376,11 @@ app.use((err, req, res, next) => {
   });
 });
 
-// 404 handler
-app.use('*', (req, res) => {
+// 404 handler  
+app.use((req, res) => {
   res.status(404).json({
     success: false,
-    message: 'Route not found'
+    message: `Route ${req.method} ${req.path} not found`
   });
 });
 
