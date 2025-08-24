@@ -6,8 +6,20 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// CORS Configuration - Updated with your frontend URL
+app.use(cors({
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:5173', 
+    'http://localhost:3001',
+    'https://abrahamnavig-quest.vercel.app'  // Your frontend URL
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
 // Middleware
-app.use(cors());
 app.use(express.json());
 
 // Simple logging middleware
@@ -26,12 +38,13 @@ app.get('/', (req, res) => {
   res.json({ 
     message: 'CryptoQuest Backend API',
     version: '1.0.0',
+    frontend: 'https://abrahamnavig-quest.vercel.app',
     endpoints: [
-      'POST /api/users',
-      'GET /api/users/:privyDid',
-      'POST /api/scores',
-      'GET /api/users/:privyDid/history',
-      'GET /api/leaderboard'
+      'POST /api/users - Create new user',
+      'GET /api/users/:privyDid - Get user profile',
+      'POST /api/scores - Submit quiz score',
+      'GET /api/users/:privyDid/history - Get user quiz history',
+      'GET /api/leaderboard - Get leaderboard'
     ]
   });
 });
@@ -387,7 +400,8 @@ app.use((req, res) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 CryptoQuest Backend running on port ${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/health`);
+  console.log(`📊 Health check available at: http://localhost:${PORT}/health`);
+  console.log(`🌐 Frontend URL: https://abrahamnavig-quest.vercel.app`);
 });
 
 // Graceful shutdown
