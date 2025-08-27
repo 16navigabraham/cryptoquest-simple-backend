@@ -105,60 +105,87 @@ class Database {
   // User operations
   async createUser(userData) {
     try {
+      // Sanitize and validate input data
       const user = {
-        walletAddress: userData.walletAddress.toLowerCase(),
-        username: userData.username,
-        profilePictureUrl: userData.profilePictureUrl || null, // IPFS URL
+        walletAddress: userData.walletAddress.toLowerCase().trim(),
+        username: userData.username.trim(),
+        profilePictureUrl: userData.profilePictureUrl ? userData.profilePictureUrl.trim() : null,
         totalScore: 0,
         level: 'beginner',
         createdAt: new Date(),
         updatedAt: new Date()
       };
 
+      // Additional validation
+      if (!user.walletAddress.match(/^0x[a-fA-F0-9]{40}$/)) {
+        throw new Error('INVALID_WALLET_FORMAT');
+      }
+
+      if (user.username.length < 3 || user.username.length > 30) {
+        throw new Error('INVALID_USERNAME_LENGTH');
+      }
+
       const result = await this.db.collection('users').insertOne(user);
       return { ...user, _id: result.insertedId };
     } catch (error) {
       if (error.code === 11000) {
-        throw new Error('User with this wallet address already exists');
+        throw new Error('USER_ALREADY_EXISTS');
       }
-      throw error;
+      if (error.message.startsWith('INVALID_')) {
+        throw error;
+      }
+      console.error('Database error in createUser:', error);
+      throw new Error('DATABASE_CREATE_ERROR');
     }
   }
 
   async getUserByWallet(walletAddress) {
     try {
+      const cleanWalletAddress = walletAddress.toLowerCase().trim();
       const user = await this.db.collection('users').findOne({
-        walletAddress: walletAddress.toLowerCase()
+        walletAddress: cleanWalletAddress
       });
       return user;
     } catch (error) {
-      throw error;
+      console.error('Database error in getUserByWallet:', error);
+      throw new Error('DATABASE_FETCH_ERROR');
     }
   }
 
   async updateUser(walletAddress, updateData) {
     try {
+      // Sanitize update data
+      const sanitizedData = {};
+      
+      if (updateData.username) {
+        sanitizedData.username = updateData.username.trim();
+        if (sanitizedData.username.length < 3 || sanitizedData.username.length > 30) {
+          throw new Error('INVALID_USERNAME_LENGTH');
+        }
+      }
+      
+      if (updateData.profilePictureUrl !== undefined) {
+        sanitizedData.profilePictureUrl = updateData.profilePictureUrl ? updateData.profilePictureUrl.trim() : null;
+      }
+      
       const updateFields = {
-        ...updateData,
+        ...sanitizedData,
         updatedAt: new Date()
       };
 
-      // Remove undefined fields
-      Object.keys(updateFields).forEach(key => {
-        if (updateFields[key] === undefined) {
-          delete updateFields[key];
-        }
-      });
-
       const result = await this.db.collection('users').findOneAndUpdate(
-        { walletAddress: walletAddress.toLowerCase() },
+        { walletAddress: walletAddress.toLowerCase().trim() },
         { $set: updateFields },
         { returnDocument: 'after' }
       );
 
       return result.value;
     } catch (error) {
-      throw error;
+      if (error.message.startsWith('INVALID_')) {
+        throw error;
+      }
+      console.error('Database error in updateUser:', error);
+      throw new Error('DATABASE_UPDATE_ERROR');
     }
   }
 

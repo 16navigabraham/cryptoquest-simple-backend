@@ -192,17 +192,31 @@ app.post('/api/users', checkDbConnection, async (req, res) => {
   } catch (error) {
     console.error('Error in POST /api/users:', error);
     
-    if (error.message.includes('already exists')) {
+    // Handle specific error types without exposing sensitive data
+    if (error.message === 'USER_ALREADY_EXISTS') {
       return res.status(409).json({
         success: false,
-        message: error.message
+        message: 'User with this wallet address already exists'
+      });
+    }
+    
+    if (error.message === 'INVALID_WALLET_FORMAT') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid wallet address format'
+      });
+    }
+    
+    if (error.message === 'INVALID_USERNAME_LENGTH') {
+      return res.status(400).json({
+        success: false,
+        message: 'Username must be between 3 and 30 characters'
       });
     }
 
     res.status(500).json({
       success: false,
-      message: 'Internal server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      message: 'Failed to create or update user profile'
     });
   }
 });
@@ -257,8 +271,7 @@ app.get('/api/users/:walletAddress', checkDbConnection, async (req, res) => {
     console.error('Error in GET /api/users/:walletAddress:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      message: 'Failed to retrieve user profile'
     });
   }
 });
@@ -348,8 +361,7 @@ app.post('/api/scores', checkDbConnection, async (req, res) => {
 
     res.status(500).json({
       success: false,
-      message: 'Internal server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      message: 'Failed to submit quiz score'
     });
   }
 });
@@ -401,8 +413,7 @@ app.get('/api/users/:walletAddress/history', checkDbConnection, async (req, res)
     console.error('Error in GET /api/users/:walletAddress/history:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      message: 'Failed to fetch quiz history'
     });
   }
 });
@@ -429,8 +440,7 @@ app.get('/api/leaderboard', checkDbConnection, async (req, res) => {
     console.error('Error in GET /api/leaderboard:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      message: 'Failed to fetch leaderboard'
     });
   }
 });
@@ -440,8 +450,7 @@ app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({
     success: false,
-    message: 'Internal server error',
-    error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    message: 'Something went wrong'
   });
 });
 
