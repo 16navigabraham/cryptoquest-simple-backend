@@ -1,46 +1,316 @@
-const sqlite3 = require('sqlite3').verbose();
+const { MongoClient } = require('mongodb');
+require('dotenv').config();
 
-// Create/connect to SQLite database
-const db = new sqlite3.Database('cryptoquest.db', (err) => {
-  if (err) {
-    console.error('Error opening database:', err.message);
-  } else {
-    console.log('Connected to SQLite database');
-    initializeDatabase();
+class Database {
+  constructor() {
+    this.client = null;
+    this.db = null;
   }
-});
 
-function initializeDatabase() {
-  // Create users table - simplified with wallet address as primary identifier
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      wallet_address TEXT UNIQUE NOT NULL,
-      username TEXT NOT NULL,
-      profile_picture TEXT,
-      total_score INTEGER DEFAULT 0,
-      level TEXT DEFAULT 'beginner',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+  async connect() {
+    try {
+      // MongoDB connection string from environment variables
+      const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017';
+      const dbName = process.env.DB_NAME || 'cryptoquest';
 
-  // Create scores table - using wallet address instead of privy_did
-  db.run(`
-    CREATE TABLE IF NOT EXISTS scores (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      wallet_address TEXT NOT NULL,
-      quiz_id TEXT NOT NULL,
-      score INTEGER NOT NULL,
-      difficulty TEXT NOT NULL,
-      max_score INTEGER DEFAULT 20,
-      percentage REAL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(wallet_address, quiz_id),
-      FOREIGN KEY (wallet_address) REFERENCES users (wallet_address)
-    )
-  `);
+      this.client = new MongoClient(uri, {
+        useNewUrlParser: true,
+        useUnifiedTopology: true,
+      });
 
-  console.log('Database tables initialized');
+      await this.client.connect();
+      this.db = this.client.db(dbName);
+      
+      console.log('Connected to MongoDB database');
+      await this.initializeCollections();
+      
+      return this.db;
+    } catch (error) {
+      console.error('Error connecting to MongoDB:', error);
+      throw error;
+    }
+  }
+
+  async initializeCollections() {
+    try {
+      // Create collections if they don't exist
+      const collections = await this.db.listCollections().toArray();
+      const collectionNames = collections.map(col => col.name);
+
+      // Create users collection with indexes
+      if (!collectionNames.includes('users')) {
+        await this.db.createCollection('users');
+        console.log('Users collection created');
+      }
+
+      // Create scores collection with indexes
+      if (!collectionNames.includes('scores')) {
+        await this.db.createCollection('scores');
+        console.log('Scores collection created');
+      }
+
+      // Create indexes for better performance
+      await this.createIndexes();
+
+    } catch (error) {
+      console.error('Error initializing collections:', error);
+      throw error;
+    }
+  }
+
+  async createIndexes() {
+    try {
+      // Users collection indexes
+      await this.db.collection('users').createIndex(
+        { walletAddress: 1 }, 
+        { unique: true, name: 'wallet_address_unique' }
+      );
+      await this.db.collection('users').createIndex(
+        { username: 1 }, 
+        { name: 'username_index' }
+      );
+      await this.db.collection('users').createIndex(
+        { totalScore: -1 }, 
+        { name: 'total_score_desc' }
+      );
+      await this.db.collection('users').createIndex(
+        { createdAt: -1 }, 
+        { name: 'created_at_desc' }
+      );
+
+      // Scores collection indexes
+      await this.db.collection('scores').createIndex(
+        { walletAddress: 1, quizId: 1 }, 
+        { unique: true, name: 'wallet_quiz_unique' }
+      );
+      await this.db.collection('scores').createIndex(
+        { walletAddress: 1 }, 
+        { name: 'wallet_address_scores' }
+      );
+      await this.db.collection('scores').createIndex(
+        { createdAt: -1 }, 
+        { name: 'created_at_scores_desc' }
+      );
+      await this.db.collection('scores').createIndex(
+        { difficulty: 1 }, 
+        { name: 'difficulty_index' }
+      );
+
+      console.log('Database indexes created successfully');
+    } catch (error) {
+      console.error('Error creating indexes:', error);
+    }
+  }
+
+  // User operations
+  async createUser(userData) {
+    try {
+      const user = {
+        walletAddress: userData.walletAddress.toLowerCase(),
+        username: userData.username,
+        profilePictureUrl: userData.profilePictureUrl || null, // IPFS URL
+        totalScore: 0,
+        level: 'beginner',
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+
+      const result = await this.db.collection('users').insertOne(user);
+      return { ...user, _id: result.insertedId };
+    } catch (error) {
+      if (error.code === 11000) {
+        throw new Error('User with this wallet address already exists');
+      }
+      throw error;
+    }
+  }
+
+  async getUserByWallet(walletAddress) {
+    try {
+      const user = await this.db.collection('users').findOne({
+        walletAddress: walletAddress.toLowerCase()
+      });
+      return user;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async updateUser(walletAddress, updateData) {
+    try {
+      const updateFields = {
+        ...updateData,
+        updatedAt: new Date()
+      };
+
+      // Remove undefined fields
+      Object.keys(updateFields).forEach(key => {
+        if (updateFields[key] === undefined) {
+          delete updateFields[key];
+        }
+      });
+
+      const result = await this.db.collection('users').findOneAndUpdate(
+        { walletAddress: walletAddress.toLowerCase() },
+        { $set: updateFields },
+        { returnDocument: 'after' }
+      );
+
+      return result.value;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async getUserStats(walletAddress) {
+    try {
+      const stats = await this.db.collection('scores').aggregate([
+        { $match: { walletAddress: walletAddress.toLowerCase() } },
+        {
+          $group: {
+            _id: null,
+            quizCount: { $sum: 1 },
+            averageScore: { $avg: '$score' },
+            bestScore: { $max: '$score' },
+            totalScore: { $sum: '$score' }
+          }
+        }
+      ]).toArray();
+
+      return stats[0] || {
+        quizCount: 0,
+        averageScore: 0,
+        bestScore: 0,
+        totalScore: 0
+      };
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  // Score operations
+  async createScore(scoreData) {
+    try {
+      const score = {
+        walletAddress: scoreData.walletAddress.toLowerCase(),
+        quizId: scoreData.quizId,
+        score: scoreData.score,
+        difficulty: scoreData.difficulty,
+        maxScore: scoreData.maxScore || 20,
+        percentage: (scoreData.score / (scoreData.maxScore || 20)) * 100,
+        createdAt: new Date()
+      };
+
+      const result = await this.db.collection('scores').insertOne(score);
+      return { ...score, _id: result.insertedId };
+    } catch (error) {
+      if (error.code === 11000) {
+        throw new Error('Quiz already completed by this user');
+      }
+      throw error;
+    }
+  }
+
+  async getUserScoreHistory(walletAddress, limit = 20, offset = 0) {
+    try {
+      const scores = await this.db.collection('scores')
+        .find({ walletAddress: walletAddress.toLowerCase() })
+        .sort({ createdAt: -1 })
+        .skip(offset)
+        .limit(limit)
+        .toArray();
+
+      const total = await this.db.collection('scores')
+        .countDocuments({ walletAddress: walletAddress.toLowerCase() });
+
+      return {
+        scores,
+        total,
+        hasMore: total > offset + scores.length
+      };
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  // Leaderboard operations
+  async getLeaderboard(limit = 100) {
+    try {
+      const pipeline = [
+        { $match: { totalScore: { $gt: 0 } } },
+        {
+          $lookup: {
+            from: 'scores',
+            localField: 'walletAddress',
+            foreignField: 'walletAddress',
+            as: 'userScores'
+          }
+        },
+        {
+          $addFields: {
+            quizCount: { $size: '$userScores' }
+          }
+        },
+        {
+          $project: {
+            walletAddress: 1,
+            username: 1,
+            profilePictureUrl: 1,
+            totalScore: 1,
+            level: 1,
+            createdAt: 1,
+            quizCount: 1
+          }
+        },
+        { $sort: { totalScore: -1 } },
+        { $limit: limit }
+      ];
+
+      const users = await this.db.collection('users').aggregate(pipeline).toArray();
+      
+      const leaderboard = users.map((user, index) => ({
+        rank: index + 1,
+        walletAddress: user.walletAddress,
+        username: user.username,
+        profilePictureUrl: user.profilePictureUrl,
+        score: user.totalScore,
+        level: user.level,
+        quizCount: user.quizCount,
+        joinedDate: user.createdAt
+      }));
+
+      return leaderboard;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async updateUserTotalScore(walletAddress, scoreToAdd) {
+    try {
+      const result = await this.db.collection('users').findOneAndUpdate(
+        { walletAddress: walletAddress.toLowerCase() },
+        { 
+          $inc: { totalScore: scoreToAdd },
+          $set: { updatedAt: new Date() }
+        },
+        { returnDocument: 'after' }
+      );
+
+      return result.value;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  async close() {
+    if (this.client) {
+      await this.client.close();
+      console.log('Database connection closed');
+    }
+  }
 }
 
-module.exports = db;
+// Create and export database instance
+const database = new Database();
+
+module.exports = database;

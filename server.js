@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const db = require('./database');
+const database = require('./database');
 require('dotenv').config();
 
 const app = express();
@@ -31,19 +31,47 @@ app.use((req, res, next) => {
   next();
 });
 
+// Initialize database connection
+let dbReady = false;
+
+database.connect()
+  .then(() => {
+    dbReady = true;
+    console.log('Database connected successfully');
+  })
+  .catch(error => {
+    console.error('Failed to connect to database:', error);
+    process.exit(1);
+  });
+
+// Middleware to check database connection
+const checkDbConnection = (req, res, next) => {
+  if (!dbReady) {
+    return res.status(503).json({
+      success: false,
+      message: 'Database not ready'
+    });
+  }
+  next();
+};
+
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'OK', 
+    timestamp: new Date().toISOString(),
+    database: dbReady ? 'connected' : 'disconnected'
+  });
 });
 
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    message: 'CryptoQuest Backend API - Simplified Version',
-    version: '2.0.0',
+    message: 'CryptoQuest Backend API - MongoDB Version',
+    version: '3.0.0',
     endpoints: [
       'POST /api/users - Create/Update user profile',
-      'GET /api/users/:walletAddress - Get user profile', 
+      'GET /api/users/:walletAddress - Get user profile with stats', 
       'POST /api/scores - Submit quiz score',
       'GET /api/users/:walletAddress/history - Get user quiz history',
       'GET /api/leaderboard - Get leaderboard'
@@ -51,400 +79,369 @@ app.get('/', (req, res) => {
   });
 });
 
+// Utility function to validate wallet address
+const isValidWalletAddress = (address) => {
+  return /^0x[a-fA-F0-9]{40}$/.test(address);
+};
+
+// Utility function to validate IPFS URL
+const isValidIPFSUrl = (url) => {
+  if (!url) return true; // Optional field
+  return url.startsWith('ipfs://') || 
+         url.startsWith('https://ipfs.io/ipfs/') || 
+         url.startsWith('https://gateway.pinata.cloud/ipfs/') ||
+         url.includes('ipfs');
+};
+
 // =====================================================
 // ENDPOINT 1: POST /api/users - Create or Update User Profile
 // =====================================================
-app.post('/api/users', (req, res) => {
-  const { walletAddress, username, profilePicture } = req.body;
+app.post('/api/users', checkDbConnection, async (req, res) => {
+  try {
+    const { walletAddress, username, profilePictureUrl } = req.body;
 
-  // Validate required fields
-  if (!walletAddress || !username) {
-    return res.status(400).json({
-      success: false,
-      message: 'walletAddress and username are required'
-    });
-  }
+    // Validate required fields
+    if (!walletAddress || !username) {
+      return res.status(400).json({
+        success: false,
+        message: 'walletAddress and username are required'
+      });
+    }
 
-  // Validate wallet address format
-  if (!/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
-    return res.status(400).json({
-      success: false,
-      message: 'Invalid wallet address format'
-    });
-  }
+    // Validate wallet address format
+    if (!isValidWalletAddress(walletAddress)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid wallet address format. Must be a valid Ethereum address (0x...)'
+      });
+    }
 
-  // Check if user already exists
-  db.get(
-    'SELECT * FROM users WHERE wallet_address = ?',
-    [walletAddress.toLowerCase()],
-    (err, existingUser) => {
-      if (err) {
-        console.error('Database error:', err);
+    // Validate profile picture URL if provided
+    if (profilePictureUrl && !isValidIPFSUrl(profilePictureUrl)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid profile picture URL. Must be a valid IPFS URL'
+      });
+    }
+
+    // Validate username length
+    if (username.length < 3 || username.length > 30) {
+      return res.status(400).json({
+        success: false,
+        message: 'Username must be between 3 and 30 characters'
+      });
+    }
+
+    // Check if user already exists
+    const existingUser = await database.getUserByWallet(walletAddress);
+
+    if (existingUser) {
+      // Update existing user
+      const updateData = {
+        username,
+        ...(profilePictureUrl && { profilePictureUrl })
+      };
+
+      const updatedUser = await database.updateUser(walletAddress, updateData);
+
+      if (!updatedUser) {
         return res.status(500).json({
           success: false,
-          message: 'Database error'
+          message: 'Failed to update user'
         });
       }
 
-      if (existingUser) {
-        // Update existing user
-        db.run(
-          'UPDATE users SET username = ?, profile_picture = ? WHERE wallet_address = ?',
-          [username, profilePicture || existingUser.profile_picture, walletAddress.toLowerCase()],
-          function(err) {
-            if (err) {
-              console.error('Error updating user:', err);
-              return res.status(500).json({
-                success: false,
-                message: 'Failed to update user'
-              });
-            }
+      res.json({
+        success: true,
+        message: 'User updated successfully',
+        data: {
+          id: updatedUser._id,
+          walletAddress: updatedUser.walletAddress,
+          username: updatedUser.username,
+          profilePictureUrl: updatedUser.profilePictureUrl,
+          totalScore: updatedUser.totalScore,
+          level: updatedUser.level,
+          createdAt: updatedUser.createdAt,
+          updatedAt: updatedUser.updatedAt
+        }
+      });
+    } else {
+      // Create new user
+      const newUser = await database.createUser({
+        walletAddress,
+        username,
+        profilePictureUrl
+      });
 
-            // Get updated user
-            db.get(
-              'SELECT * FROM users WHERE wallet_address = ?',
-              [walletAddress.toLowerCase()],
-              (err, user) => {
-                if (err) {
-                  return res.status(500).json({
-                    success: false,
-                    message: 'User updated but failed to retrieve'
-                  });
-                }
-
-                res.json({
-                  success: true,
-                  message: 'User updated successfully',
-                  data: user
-                });
-              }
-            );
-          }
-        );
-      } else {
-        // Create new user
-        db.run(
-          'INSERT INTO users (wallet_address, username, profile_picture) VALUES (?, ?, ?)',
-          [walletAddress.toLowerCase(), username, profilePicture],
-          function(err) {
-            if (err) {
-              console.error('Error creating user:', err);
-              return res.status(500).json({
-                success: false,
-                message: 'Failed to create user'
-              });
-            }
-
-            // Get created user
-            db.get(
-              'SELECT * FROM users WHERE wallet_address = ?',
-              [walletAddress.toLowerCase()],
-              (err, user) => {
-                if (err) {
-                  return res.status(500).json({
-                    success: false,
-                    message: 'User created but failed to retrieve'
-                  });
-                }
-
-                res.status(201).json({
-                  success: true,
-                  message: 'User created successfully',
-                  data: user
-                });
-              }
-            );
-          }
-        );
-      }
+      res.status(201).json({
+        success: true,
+        message: 'User created successfully',
+        data: {
+          id: newUser._id,
+          walletAddress: newUser.walletAddress,
+          username: newUser.username,
+          profilePictureUrl: newUser.profilePictureUrl,
+          totalScore: newUser.totalScore,
+          level: newUser.level,
+          createdAt: newUser.createdAt,
+          updatedAt: newUser.updatedAt
+        }
+      });
     }
-  );
+
+  } catch (error) {
+    console.error('Error in POST /api/users:', error);
+    
+    if (error.message.includes('already exists')) {
+      return res.status(409).json({
+        success: false,
+        message: error.message
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
 });
 
 // =====================================================
 // ENDPOINT 2: GET /api/users/:walletAddress - Get User Profile
 // =====================================================
-app.get('/api/users/:walletAddress', (req, res) => {
-  const walletAddress = req.params.walletAddress.toLowerCase();
+app.get('/api/users/:walletAddress', checkDbConnection, async (req, res) => {
+  try {
+    const walletAddress = req.params.walletAddress;
 
-  db.get(
-    'SELECT * FROM users WHERE wallet_address = ?',
-    [walletAddress],
-    (err, user) => {
-      if (err) {
-        console.error('Database error:', err);
-        return res.status(500).json({
-          success: false,
-          message: 'Database error'
-        });
-      }
-
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: 'User not found'
-        });
-      }
-
-      // Get user stats
-      db.all(
-        `SELECT 
-          COUNT(*) as quiz_count,
-          AVG(score) as average_score,
-          MAX(score) as best_score
-         FROM scores WHERE wallet_address = ?`,
-        [walletAddress],
-        (err, stats) => {
-          const userStats = stats && stats[0] ? stats[0] : {
-            quiz_count: 0,
-            average_score: 0,
-            best_score: 0
-          };
-
-          res.json({
-            success: true,
-            data: {
-              ...user,
-              stats: {
-                quizzes_completed: userStats.quiz_count,
-                average_score: Math.round(userStats.average_score || 0),
-                best_score: userStats.best_score || 0
-              }
-            }
-          });
-        }
-      );
+    // Validate wallet address format
+    if (!isValidWalletAddress(walletAddress)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid wallet address format'
+      });
     }
-  );
+
+    const user = await database.getUserByWallet(walletAddress);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Get user stats
+    const stats = await database.getUserStats(walletAddress);
+
+    res.json({
+      success: true,
+      data: {
+        id: user._id,
+        walletAddress: user.walletAddress,
+        username: user.username,
+        profilePictureUrl: user.profilePictureUrl, // This was missing in SQLite version
+        totalScore: user.totalScore,
+        level: user.level,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+        stats: {
+          quizzesCompleted: stats.quizCount,
+          averageScore: Math.round(stats.averageScore || 0),
+          bestScore: stats.bestScore || 0
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in GET /api/users/:walletAddress:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
 });
 
 // =====================================================
 // ENDPOINT 3: POST /api/scores - Submit Quiz Score
 // =====================================================
-app.post('/api/scores', (req, res) => {
-  const { walletAddress, quizId, score, difficulty, maxScore = 20 } = req.body;
+app.post('/api/scores', checkDbConnection, async (req, res) => {
+  try {
+    const { walletAddress, quizId, score, difficulty, maxScore = 20 } = req.body;
 
-  // Validate required fields
-  if (!walletAddress || !quizId || score === undefined || !difficulty) {
-    return res.status(400).json({
-      success: false,
-      message: 'walletAddress, quizId, score, and difficulty are required',
-      received: { walletAddress, quizId, score, difficulty }
-    });
-  }
-
-  // Validate score
-  if (typeof score !== 'number' || score < 0) {
-    return res.status(400).json({
-      success: false,
-      message: 'Score must be a non-negative number'
-    });
-  }
-
-  const walletAddr = walletAddress.toLowerCase();
-  const percentage = (score / maxScore) * 100;
-
-  // Check if user exists
-  db.get(
-    'SELECT * FROM users WHERE wallet_address = ?',
-    [walletAddr],
-    (err, user) => {
-      if (err) {
-        console.error('Database error:', err);
-        return res.status(500).json({
-          success: false,
-          message: 'Database error'
-        });
-      }
-
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: 'User not found. Please create profile first.'
-        });
-      }
-
-      // Insert score
-      db.run(
-        'INSERT INTO scores (wallet_address, quiz_id, score, difficulty, max_score, percentage) VALUES (?, ?, ?, ?, ?, ?)',
-        [walletAddr, quizId, score, difficulty, maxScore, percentage],
-        function(err) {
-          if (err) {
-            if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-              return res.status(409).json({
-                success: false,
-                message: 'Quiz already completed'
-              });
-            }
-            console.error('Error saving score:', err);
-            return res.status(500).json({
-              success: false,
-              message: 'Failed to save score'
-            });
-          }
-
-          // Update user's total score
-          const newTotalScore = user.total_score + score;
-          
-          db.run(
-            'UPDATE users SET total_score = ? WHERE wallet_address = ?',
-            [newTotalScore, walletAddr],
-            (err) => {
-              if (err) {
-                console.error('Error updating total score:', err);
-                return res.status(500).json({
-                  success: false,
-                  message: 'Score saved but failed to update total'
-                });
-              }
-
-              res.status(201).json({
-                success: true,
-                message: 'Score submitted successfully',
-                data: {
-                  scoreId: this.lastID,
-                  score,
-                  maxScore,
-                  percentage: Math.round(percentage),
-                  newTotalScore,
-                  difficulty,
-                  eligible_for_reward: percentage >= 70 // 70% minimum for rewards
-                }
-              });
-            }
-          );
-        }
-      );
+    // Validate required fields
+    if (!walletAddress || !quizId || score === undefined || !difficulty) {
+      return res.status(400).json({
+        success: false,
+        message: 'walletAddress, quizId, score, and difficulty are required',
+        received: { walletAddress, quizId, score, difficulty }
+      });
     }
-  );
+
+    // Validate score
+    if (typeof score !== 'number' || score < 0 || score > maxScore) {
+      return res.status(400).json({
+        success: false,
+        message: `Score must be a number between 0 and ${maxScore}`
+      });
+    }
+
+    // Validate difficulty
+    const validDifficulties = ['easy', 'medium', 'hard', 'beginner', 'intermediate', 'advanced'];
+    if (!validDifficulties.includes(difficulty.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid difficulty. Must be one of: ' + validDifficulties.join(', ')
+      });
+    }
+
+    // Check if user exists
+    const user = await database.getUserByWallet(walletAddress);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found. Please create profile first.'
+      });
+    }
+
+    // Create score record
+    const scoreData = {
+      walletAddress,
+      quizId,
+      score,
+      difficulty: difficulty.toLowerCase(),
+      maxScore
+    };
+
+    const newScore = await database.createScore(scoreData);
+    const percentage = newScore.percentage;
+
+    // Update user's total score
+    const updatedUser = await database.updateUserTotalScore(walletAddress, score);
+
+    res.status(201).json({
+      success: true,
+      message: 'Score submitted successfully',
+      data: {
+        scoreId: newScore._id,
+        score: newScore.score,
+        maxScore: newScore.maxScore,
+        percentage: Math.round(percentage),
+        difficulty: newScore.difficulty,
+        newTotalScore: updatedUser.totalScore,
+        eligibleForReward: percentage >= 70, // 70% minimum for rewards
+        submittedAt: newScore.createdAt
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in POST /api/scores:', error);
+    
+    if (error.message.includes('already completed')) {
+      return res.status(409).json({
+        success: false,
+        message: error.message
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
 });
 
 // =====================================================
 // ENDPOINT 4: GET /api/users/:walletAddress/history
 // =====================================================
-app.get('/api/users/:walletAddress/history', (req, res) => {
-  const walletAddress = req.params.walletAddress.toLowerCase();
-  const limit = parseInt(req.query.limit) || 20;
-  const offset = parseInt(req.query.offset) || 0;
+app.get('/api/users/:walletAddress/history', checkDbConnection, async (req, res) => {
+  try {
+    const walletAddress = req.params.walletAddress;
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100); // Max 100 per request
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
 
-  db.get(
-    'SELECT wallet_address FROM users WHERE wallet_address = ?',
-    [walletAddress],
-    (err, user) => {
-      if (err) {
-        return res.status(500).json({
-          success: false,
-          message: 'Database error'
-        });
-      }
-
-      if (!user) {
-        return res.status(404).json({
-          success: false,
-          message: 'User not found'
-        });
-      }
-
-      // Get quiz history
-      db.all(
-        'SELECT * FROM scores WHERE wallet_address = ? ORDER BY created_at DESC LIMIT ? OFFSET ?',
-        [walletAddress, limit, offset],
-        (err, scores) => {
-          if (err) {
-            console.error('Error fetching history:', err);
-            return res.status(500).json({
-              success: false,
-              message: 'Failed to fetch quiz history'
-            });
-          }
-
-          // Get total count
-          db.get(
-            'SELECT COUNT(*) as total FROM scores WHERE wallet_address = ?',
-            [walletAddress],
-            (err, countResult) => {
-              const total = countResult?.total || 0;
-
-              res.json({
-                success: true,
-                data: {
-                  history: scores,
-                  pagination: {
-                    total,
-                    limit,
-                    offset,
-                    hasMore: total > offset + scores.length
-                  }
-                }
-              });
-            }
-          );
-        }
-      );
+    // Validate wallet address
+    if (!isValidWalletAddress(walletAddress)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid wallet address format'
+      });
     }
-  );
+
+    // Check if user exists
+    const user = await database.getUserByWallet(walletAddress);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Get quiz history
+    const historyData = await database.getUserScoreHistory(walletAddress, limit, offset);
+
+    res.json({
+      success: true,
+      data: {
+        history: historyData.scores,
+        pagination: {
+          total: historyData.total,
+          limit,
+          offset,
+          hasMore: historyData.hasMore
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Error in GET /api/users/:walletAddress/history:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
 });
 
 // =====================================================
 // ENDPOINT 5: GET /api/leaderboard
 // =====================================================
-app.get('/api/leaderboard', (req, res) => {
-  const limit = parseInt(req.query.limit) || 100;
+app.get('/api/leaderboard', checkDbConnection, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500); // Max 500 per request
 
-  db.all(
-    `SELECT 
-      users.wallet_address,
-      users.username,
-      users.profile_picture,
-      users.total_score,
-      users.level,
-      users.created_at,
-      COUNT(scores.id) as quiz_count
-     FROM users 
-     LEFT JOIN scores ON users.wallet_address = scores.wallet_address
-     WHERE users.total_score > 0 
-     GROUP BY users.wallet_address
-     ORDER BY users.total_score DESC 
-     LIMIT ?`,
-    [limit],
-    (err, users) => {
-      if (err) {
-        console.error('Error fetching leaderboard:', err);
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to fetch leaderboard'
-        });
+    const leaderboard = await database.getLeaderboard(limit);
+
+    res.json({
+      success: true,
+      data: {
+        leaderboard,
+        totalPlayers: leaderboard.length,
+        lastUpdated: new Date().toISOString()
       }
+    });
 
-      const leaderboard = users.map((user, index) => ({
-        rank: index + 1,
-        wallet_address: user.wallet_address,
-        username: user.username,
-        profile_picture: user.profile_picture,
-        score: user.total_score,
-        level: user.level,
-        quiz_count: user.quiz_count,
-        joined_date: user.created_at
-      }));
-
-      res.json({
-        success: true,
-        data: {
-          leaderboard,
-          total_players: users.length,
-          last_updated: new Date().toISOString()
-        }
-      });
-    }
-  );
+  } catch (error) {
+    console.error('Error in GET /api/leaderboard:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
 });
 
-// Error handling
+// Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
   res.status(500).json({
     success: false,
-    message: 'Internal server error'
+    message: 'Internal server error',
+    error: process.env.NODE_ENV === 'development' ? err.message : undefined
   });
 });
 
@@ -464,14 +461,17 @@ app.listen(PORT, () => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\nShutting down server...');
-  db.close((err) => {
-    if (err) {
-      console.error('Error closing database:', err.message);
-    } else {
-      console.log('Database connection closed');
-    }
+const gracefulShutdown = async (signal) => {
+  console.log(`\n${signal} received. Shutting down gracefully...`);
+  
+  try {
+    await database.close();
     process.exit(0);
-  });
-});
+  } catch (error) {
+    console.error('Error during shutdown:', error);
+    process.exit(1);
+  }
+};
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
